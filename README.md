@@ -11,6 +11,8 @@ balancer or paid CloudWatch features.
 
 **Step-by-step instructions: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**
 
+**CI/CD with Jules, Jenkins and Spinnaker: [docs/CICD.md](docs/CICD.md)**
+
 ## Layout
 
 ```
@@ -29,6 +31,7 @@ balancer or paid CloudWatch features.
 │   ├── ecr.tf                   container registry
 │   ├── cloudwatch.tf            SNS, 9 alarms, log metric filter, dashboard
 │   ├── budget.tf                US$1 cost alert
+│   ├── ci.tf                    optional IAM user for Jenkins (ECR push)
 │   └── terraform.tfvars.example
 ├── scripts/
 │   ├── get_kubeconfig.sh        fetch kubeconfig from the server
@@ -36,7 +39,13 @@ balancer or paid CloudWatch features.
 │   ├── deploy.sh                helm upgrade --install
 │   ├── test_alarms.sh           trigger alarms on purpose
 │   └── destroy.sh               tear everything down
-└── docs/DEPLOYMENT.md           full guide
+├── Jenkinsfile                  CI pipeline (tests, lint, validate, build, push to ECR)
+├── spinnaker/                   CD: application, deploy + rollback pipelines, Halyard setup
+├── AGENTS.md                    rules and checks for the Jules coding agent
+├── .github/ISSUE_TEMPLATE/      "Task for Jules" issue template
+└── docs/
+    ├── DEPLOYMENT.md            full deployment guide
+    └── CICD.md                  Jules → Jenkins → Spinnaker setup
 ```
 
 ## Quick start

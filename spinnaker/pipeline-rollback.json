@@ -1,0 +1,40 @@
+{
+  "application": "sampleweb",
+  "name": "rollback-sample-web",
+  "description": "Manually started: approve, then roll the sample-web Deployment back to its previous ReplicaSet revision.",
+  "keepWaitingPipelines": false,
+  "limitConcurrent": true,
+  "parameterConfig": [
+    {
+      "name": "revisionsBack",
+      "label": "Revisions to roll back",
+      "required": true,
+      "default": "1"
+    }
+  ],
+  "triggers": [],
+  "stages": [
+    {
+      "refId": "1",
+      "requisiteStageRefIds": [],
+      "type": "manualJudgment",
+      "name": "Confirm rollback",
+      "instructions": "Roll sample-web back by ${parameters.revisionsBack} revision(s)?",
+      "judgmentInputs": [],
+      "failPipeline": true
+    },
+    {
+      "refId": "2",
+      "requisiteStageRefIds": ["1"],
+      "type": "undoRolloutManifest",
+      "name": "Undo rollout",
+      "cloudProvider": "kubernetes",
+      "account": "k3s-us-east-1",
+      "location": "sample-web",
+      "manifestName": "deployment sample-web",
+      "mode": "static",
+      "numRevisionsBack": "${#toInt(parameters.revisionsBack)}"
+    }
+  ],
+  "notifications": []
+}

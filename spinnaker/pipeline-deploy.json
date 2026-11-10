@@ -1,0 +1,135 @@
+{
+  "application": "sampleweb",
+  "name": "deploy-sample-web",
+  "description": "Triggered by a successful Jenkins build of main: bakes the Helm chart with the new image tag, waits for approval, deploys to k3s and verifies the rollout.",
+  "keepWaitingPipelines": false,
+  "limitConcurrent": true,
+  "parameterConfig": [
+    {
+      "name": "imageTag",
+      "label": "Image tag (manual runs only)",
+      "description": "Used when the pipeline is started by hand instead of by Jenkins.",
+      "required": false,
+      "default": ""
+    },
+    {
+      "name": "imageRepository",
+      "label": "ECR repository URL (manual runs only)",
+      "required": false,
+      "default": "<ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/sample-web"
+    }
+  ],
+  "triggers": [
+    {
+      "type": "jenkins",
+      "enabled": true,
+      "master": "jenkins",
+      "job": "aws-sample-web-cloudwatch/main",
+      "propertyFile": "build.properties"
+    }
+  ],
+  "expectedArtifacts": [
+    {
+      "id": "helm-chart-repo",
+      "displayName": "sample-web Helm chart (git)",
+      "matchArtifact": {
+        "type": "git/repo",
+        "artifactAccount": "github-sample-web",
+        "reference": "https://github.com/rrrgit25/aws-sample-web-cloudwatch.git",
+        "version": "main"
+      },
+      "defaultArtifact": {
+        "type": "git/repo",
+        "artifactAccount": "github-sample-web",
+        "reference": "https://github.com/rrrgit25/aws-sample-web-cloudwatch.git",
+        "version": "main"
+      },
+      "useDefaultArtifact": true,
+      "usePriorArtifact": false
+    }
+  ],
+  "stages": [
+    {
+      "refId": "1",
+      "requisiteStageRefIds": [],
+      "type": "bakeManifest",
+      "name": "Bake Helm chart",
+      "templateRenderer": "HELM3",
+      "outputName": "sample-web",
+      "namespace": "sample-web",
+      "inputArtifacts": [
+        {
+          "id": "helm-chart-repo",
+          "account": "github-sample-web"
+        }
+      ],
+      "helmChartFilePath": "helm/sample-web/Chart.yaml",
+      "overrides": {
+        "fullnameOverride": "sample-web",
+        "image.repository": "${trigger.type == 'jenkins' ? trigger.properties['IMAGE_REPOSITORY'] : parameters.imageRepository}",
+        "image.tag": "${trigger.type == 'jenkins' ? trigger.properties['IMAGE_TAG'] : parameters.imageTag}"
+      },
+      "rawOverrides": false,
+      "expectedArtifacts": [
+        {
+          "id": "baked-sample-web",
+          "displayName": "Baked sample-web manifests",
+          "matchArtifact": {
+            "type": "embedded/base64",
+            "kind": "base64",
+            "name": "sample-web"
+          },
+          "defaultArtifact": {
+            "customKind": true
+          },
+          "useDefaultArtifact": false,
+          "usePriorArtifact": false
+        }
+      ]
+    },
+    {
+      "refId": "2",
+      "requisiteStageRefIds": ["1"],
+      "type": "manualJudgment",
+      "name": "Approve deploy",
+      "instructions": "Deploy image tag ${trigger.type == 'jenkins' ? trigger.properties['IMAGE_TAG'] : parameters.imageTag} to k3s (us-east-1)?",
+      "judgmentInputs": [],
+      "failPipeline": true,
+      "stageTimeoutMs": 86400000,
+      "notifications": []
+    },
+    {
+      "refId": "3",
+      "requisiteStageRefIds": ["2"],
+      "type": "deployManifest",
+      "name": "Deploy to k3s",
+      "cloudProvider": "kubernetes",
+      "account": "k3s-us-east-1",
+      "namespaceOverride": "sample-web",
+      "source": "artifact",
+      "manifestArtifactId": "baked-sample-web",
+      "moniker": {
+        "app": "sampleweb"
+      },
+      "skipExpressionEvaluation": false,
+      "trafficManagement": {
+        "enabled": false,
+        "options": {
+          "enableTraffic": false
+        }
+      }
+    },
+    {
+      "refId": "4",
+      "requisiteStageRefIds": ["3"],
+      "type": "webhook",
+      "name": "Smoke test /health/ready",
+      "method": "GET",
+      "url": "http://<APP_PUBLIC_IP>/health/ready",
+      "waitForCompletion": false,
+      "statusUrlResolution": "getMethod",
+      "failFastStatusCodes": [500, 502, 503, 504]
+    }
+  ],
+  "notifications": []
+}

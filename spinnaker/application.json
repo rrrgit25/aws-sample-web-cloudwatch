@@ -1,0 +1,9 @@
+{
+  "name": "sampleweb",
+  "email": "owner@example.com",
+  "description": "Python web app on k3s (AWS free tier), deployed from the Helm chart in GitHub",
+  "cloudProviders": "kubernetes",
+  "repoType": "github",
+  "repoProjectKey": "rrrgit25",
+  "repoSlug": "aws-sample-web-cloudwatch"
+}
