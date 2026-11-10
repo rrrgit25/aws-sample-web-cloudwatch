@@ -1,0 +1,1 @@
+create a complete sample web projects in current workspace folder using python and to deploy in aws and create a cloud watch alerm using terraform and helm chart for deployment and a documentation for the step by step instructions for deplyment. use only AWS free btier features.

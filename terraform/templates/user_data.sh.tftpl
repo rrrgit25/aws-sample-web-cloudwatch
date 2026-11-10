@@ -1,0 +1,168 @@
+#!/bin/bash
+# Bootstraps a single-node k3s cluster, the CloudWatch agent, an ECR image
+# pull-secret refresher and an app health/metrics publisher.
+# Rendered by Terraform templatefile(): a doubled dollar or percent sign before
+# an opening brace produces a literal one in the rendered script.
+set -euxo pipefail
+exec > >(tee -a /var/log/user-data.log) 2>&1
+
+KUBECTL="/usr/local/bin/k3s kubectl"
+
+# ------------------------------------------------------------------ swap
+if [ ! -f /swapfile ]; then
+  dd if=/dev/zero of=/swapfile bs=1M count=${swap_size_mb}
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+# ------------------------------------------------------------ packages
+dnf install -y amazon-cloudwatch-agent
+
+# ----------------------------------------------------------------- k3s
+# traefik is disabled to save memory; the built-in ServiceLB exposes
+# Service type=LoadBalancer on the node's port 80 (no AWS load balancer).
+curl -sfL https://get.k3s.io | \
+  INSTALL_K3S_CHANNEL="${k3s_channel}" \
+  INSTALL_K3S_SKIP_SELINUX_RPM=true \
+  INSTALL_K3S_SELINUX_WARN=true \
+  INSTALL_K3S_EXEC="server --disable traefik --write-kubeconfig-mode 644 --tls-san ${public_ip}" \
+  sh -
+
+until $KUBECTL get nodes 2>/dev/null | grep -q ' Ready'; do sleep 5; done
+$KUBECTL create namespace ${app_namespace} --dry-run=client -o yaml | $KUBECTL apply -f -
+
+# --------------------------------------------- ECR pull secret refresher
+# ECR tokens last 12 h, so a timer recreates the pull secret every 6 h.
+cat > /usr/local/bin/ecr-pull-secret.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+KUBECTL="/usr/local/bin/k3s kubectl"
+TOKEN=$(aws ecr get-login-password --region ${region})
+$KUBECTL create namespace ${app_namespace} --dry-run=client -o yaml | $KUBECTL apply -f -
+$KUBECTL -n ${app_namespace} create secret docker-registry ecr-pull \
+  --docker-server=${ecr_registry} --docker-username=AWS --docker-password="$TOKEN" \
+  --dry-run=client -o yaml | $KUBECTL apply -f -
+EOF
+chmod 755 /usr/local/bin/ecr-pull-secret.sh
+
+cat > /etc/systemd/system/ecr-pull-secret.service <<'EOF'
+[Unit]
+Description=Refresh ECR image pull secret
+After=k3s.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ecr-pull-secret.sh
+EOF
+
+cat > /etc/systemd/system/ecr-pull-secret.timer <<'EOF'
+[Unit]
+Description=Refresh ECR image pull secret every 6 hours
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=6h
+[Install]
+WantedBy=timers.target
+EOF
+
+# ------------------------------------------------- app monitor (1 / min)
+# Publishes 3 custom metrics: HealthCheck (1/0), ReadyPods, ContainerRestarts.
+cat > /usr/local/bin/app-monitor.sh <<'EOF'
+#!/bin/bash
+set -uo pipefail
+KUBECTL="/usr/local/bin/k3s kubectl"
+STATE_DIR=/var/lib/app-monitor
+mkdir -p "$STATE_DIR"
+
+IMDS_TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+
+# 1. End-to-end health check through the same port users hit
+CODE=$(curl -s -o /dev/null -m 5 -w '%%{http_code}' "http://$IP/health/ready" || true)
+HEALTH=0
+[ "$CODE" = "200" ] && HEALTH=1
+
+# 2. Ready replicas
+READY=$($KUBECTL -n ${app_namespace} get deploy ${app_name} -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+READY=$${READY:-0}
+
+# 3. Container restarts since the last run
+TOTAL=$($KUBECTL -n ${app_namespace} get pods -l app.kubernetes.io/instance=${app_name} \
+  -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{.restartCount}{" "}{end}{end}' 2>/dev/null \
+  | awk '{s=0; for (i=1; i<=NF; i++) s+=$i; print s}')
+TOTAL=$${TOTAL:-0}
+PREV=$(cat "$STATE_DIR/restarts" 2>/dev/null || echo "$TOTAL")
+DELTA=$((TOTAL - PREV))
+[ "$DELTA" -lt 0 ] && DELTA=0
+echo "$TOTAL" > "$STATE_DIR/restarts"
+
+aws cloudwatch put-metric-data --region ${region} --namespace "${metrics_namespace}" --metric-data \
+  "[{\"MetricName\":\"HealthCheck\",\"Value\":$HEALTH,\"Unit\":\"Count\"},
+    {\"MetricName\":\"ReadyPods\",\"Value\":$READY,\"Unit\":\"Count\"},
+    {\"MetricName\":\"ContainerRestarts\",\"Value\":$DELTA,\"Unit\":\"Count\"}]"
+EOF
+chmod 755 /usr/local/bin/app-monitor.sh
+
+cat > /etc/systemd/system/app-monitor.service <<'EOF'
+[Unit]
+Description=Publish app health metrics to CloudWatch
+After=k3s.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/app-monitor.sh
+EOF
+
+cat > /etc/systemd/system/app-monitor.timer <<'EOF'
+[Unit]
+Description=Publish app health metrics every minute
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+/usr/local/bin/ecr-pull-secret.sh
+systemctl enable --now ecr-pull-secret.timer app-monitor.timer
+
+# ------------------------------------------------------ CloudWatch agent
+# Only 2 custom metrics (memory, disk) to stay inside the 10-metric free tier,
+# plus the app container logs.
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'EOF'
+{
+  "agent": {
+    "metrics_collection_interval": 60,
+    "run_as_user": "root",
+    "omit_hostname": true
+  },
+  "metrics": {
+    "namespace": "CWAgent",
+    "append_dimensions": { "InstanceId": "$${aws:InstanceId}" },
+    "metrics_collected": {
+      "mem":  { "measurement": ["mem_used_percent"] },
+      "disk": { "measurement": ["used_percent"], "resources": ["/"], "drop_device": true }
+    }
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/pods/${app_namespace}_${app_name}-*/*/*.log",
+            "log_group_name": "${log_group_name}",
+            "log_stream_name": "{instance_id}"
+          }
+        ]
+      }
+    }
+  }
+}
+EOF
+
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+echo "bootstrap complete"

@@ -1,0 +1,16 @@
+{{ include "sample-web.fullname" . }} has been deployed to namespace {{ .Release.Namespace }}.
+
+{{- if eq .Values.service.type "LoadBalancer" }}
+
+The app is served on port {{ .Values.service.port }} of the server's public IP (k3s ServiceLB):
+
+  terraform -chdir=terraform output -raw app_url
+{{- else }}
+
+Port-forward to test locally:
+
+  kubectl port-forward svc/{{ include "sample-web.fullname" . }} 8080:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+  curl http://localhost:8080/api/info
+{{- end }}
+
+CloudWatch monitoring expects: namespace={{ .Release.Namespace }}, deployment={{ include "sample-web.fullname" . }}

@@ -1,0 +1,20 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+terraform.tfvars
+.terraform.lock.hcl.bak
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Misc
+.last_image_tag
+.DS_Store
+.idea/
+.kube/
